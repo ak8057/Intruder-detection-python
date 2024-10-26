@@ -5,6 +5,7 @@ import pygame
 from datetime import datetime
 import os
 
+
 class AdvancedCCTVAnalyzer:
     def __init__(self, video_source, alarm_path="alarm.wav"):
         self.video = cv2.VideoCapture(video_source)
