@@ -7,46 +7,99 @@ import os
 
 
 class AdvancedCCTVAnalyzer:
-    def __init__(self, video_source, alarm_path="alarm.wav"):
+    def __init__(self, video_source, alarm_path="alarm.wav", cascade_path="fire_detection_cascade_model.xml"):
         self.video = cv2.VideoCapture(video_source)
         self.alarm_path = alarm_path
         self.screenshot_dir = "intruder_screenshots"
         os.makedirs(self.screenshot_dir, exist_ok=True)
 
-        # Initialize pygame for audio
-        pygame.init()
+    # Initialize pygame for audio
+        pygame.mixer.init()
         pygame.mixer.music.load(self.alarm_path)
 
-        # Load YOLOv5 model
+    # Load YOLOv5 model
         self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+
+    # Load the fire detection cascade
+        self.fire_cascade = cv2.CascadeClassifier(cascade_path)
 
         self.target_classes = ['person', 'car', 'truck', 'bus']
         self.pts = []  # Polygon points for ROI
         self.number_of_photos = 3
         self.photo_count = 0
-
+    # Fire detection parameters
+        self.fire_threshold = 0.3  # Minimum ratio of fire-colored pixels
+        self.fire_detection_cooldown = 10  # Frames between fire checks
+        self.current_cooldown = 0
+        self.consecutive_detections = 0
+        self.required_consecutive = 3  # Number of consecutive detections needed
     def draw_polygon(self, event, x, y, flags, param):
+        """Handle mouse events for drawing the ROI polygon"""
         if event == cv2.EVENT_LBUTTONDOWN:
             self.pts.append([x, y])
         elif event == cv2.EVENT_RBUTTONDOWN:
             self.pts = []
 
     def inside_polygon(self, point, polygon):
-        result = cv2.pointPolygonTest(polygon, (point[0], point[1]), False)
-        return result == 1
+        """Check if a point is inside the defined polygon"""
+        if len(polygon) > 0:
+            return cv2.pointPolygonTest(polygon, (point[0], point[1]), False) >= 0
+        return False
 
     def preprocess(self, img):
+        """Preprocess the input frame"""
         height, width = img.shape[:2]
         ratio = height / width
         return cv2.resize(img, (640, int(640 * ratio)))
+        
+    def detect_fire(self, frame):
+        """
+        Fire detection using Haar/LBP Cascade and YOLOv5 (if available).
+        Returns: (bool, frame) - fire detected flag and annotated frame
+        """
+        fire_detected = False
+
+    # Detect fire-like regions with cascade
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        fire_regions = self.fire_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24))
+
+        for (x, y, w, h) in fire_regions:
+            fire_detected = True
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+            cv2.putText(frame, "Fire Detected!", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+    # Additional confirmation with YOLO (optional)
+        if fire_detected and self.model:
+            results = self.model(frame)
+            detections = results.pandas().xyxy[0]
+            for _, row in detections.iterrows():
+                if row['name'] in ['smoke', 'fire', 'flame']:
+                    x1, y1, x2, y2 = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    cv2.putText(frame, "Fire Confirmed!", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    fire_detected = True
+
+        return fire_detected, frame
+
 
     def analyze_frame(self, frame):
         frame_detected = frame.copy()
         frame = self.preprocess(frame)
+        
+        # Fire detection with cooldown
+        if self.current_cooldown <= 0:
+            fire_detected, frame = self.detect_fire(frame)
+            if fire_detected:
+                self.handle_fire(frame_detected)
+                self.current_cooldown = self.fire_detection_cooldown
+        else:
+            self.current_cooldown -= 1
 
+        # Object detection
         results = self.model(frame)
+        results = results.pandas().xyxy[0]
 
-        for index, row in results.pandas().xyxy[0].iterrows():
+        for index, row in results.iterrows():
             if row['name'] in self.target_classes:
                 name = str(row['name'])
                 x1, y1, x2, y2 = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
@@ -56,10 +109,10 @@ class AdvancedCCTVAnalyzer:
                 cv2.putText(frame, name, (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
                 cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
 
-                if len(self.pts) >= 4:
-                    if self.inside_polygon((center_x, center_y), np.array([self.pts])) and name == 'person':
-                        self.handle_intruder(frame, frame_detected, x1, y1, x2, y2, center_x, center_y)
+                if len(self.pts) >= 4 and self.inside_polygon((center_x, center_y), np.array([self.pts])) and name == 'person':
+                    self.handle_intruder(frame, frame_detected, x1, y1, x2, y2, center_x, center_y)
 
+        # Draw polygon if points are set
         if len(self.pts) >= 4:
             frame_copy = frame.copy()
             cv2.fillPoly(frame_copy, np.array([self.pts]), (0, 255, 0))
@@ -68,6 +121,7 @@ class AdvancedCCTVAnalyzer:
         return frame
 
     def handle_intruder(self, frame, frame_detected, x1, y1, x2, y2, center_x, center_y):
+        """Handle intruder detection"""
         mask = np.zeros_like(frame_detected)
         points = np.array([[x1, y1], [x1, y2], [x2, y2], [x2, y1]])
         mask = cv2.fillPoly(mask, [points.reshape((-1, 1, 2))], (255, 255, 255))
@@ -85,18 +139,33 @@ class AdvancedCCTVAnalyzer:
 
         self.generate_alarm("Intruder")
 
+    def handle_fire(self, frame):
+        """Handle fire detection"""
+        if self.photo_count < self.number_of_photos:
+            self.capture_screenshot(frame)
+
+        if not pygame.mixer.music.get_busy():
+            pygame.mixer.music.play()
+
+        self.generate_alarm("Fire")
+
     def capture_screenshot(self, frame):
+        """Capture and save screenshot"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{self.screenshot_dir}/intruder_{timestamp}_{self.photo_count}.jpg"
         cv2.imwrite(filename, frame)
         print(f"Screenshot saved: {filename}")
         self.photo_count += 1
+        if self.photo_count >= self.number_of_photos:
+            self.photo_count = 0
 
     def generate_alarm(self, event_type):
+        """Generate alarm with timestamp"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"ALARM: {event_type} detected at {timestamp}")
 
     def run(self):
+        """Main run loop"""
         cv2.namedWindow('CCTV Analysis')
         cv2.setMouseCallback('CCTV Analysis', self.draw_polygon)
 
@@ -114,8 +183,13 @@ class AdvancedCCTVAnalyzer:
         self.video.release()
         cv2.destroyAllWindows()
 
+
 if __name__ == "__main__":
-    video_source = "Test Videos/thief_video.mp4"  # Change this to 0 for webcam
-    alarm_path = "Alarm/alarm.wav"  # Make sure this path is correct
+    # video_source = "Test Videos/fire.mp4"
+    # video_source = "Test Videos/fire4.mp4"
+    # video_source = "Test Videos/fire5.mp4"
+    video_source = 0
+    # video_source = "Test Videos/thief_video.mp4"
+    alarm_path = "Alarm/alarm.wav"
     analyzer = AdvancedCCTVAnalyzer(video_source, alarm_path)
     analyzer.run()
