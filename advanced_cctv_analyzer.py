@@ -4,10 +4,17 @@ import numpy as np
 import pygame
 from datetime import datetime
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
+import time
 
 
 class AdvancedCCTVAnalyzer:
-    def __init__(self, video_source, alarm_path="alarm.wav", cascade_path="fire_detection_cascade_model.xml"):
+    def __init__(self, video_source, alarm_path="alarm.wav", cascade_path="fire_detection_cascade_model.xml", 
+
+                 email_config=None):
         self.video = cv2.VideoCapture(video_source)
         self.alarm_path = alarm_path
         self.screenshot_dir = "intruder_screenshots"
@@ -33,6 +40,147 @@ class AdvancedCCTVAnalyzer:
         self.current_cooldown = 0
         self.consecutive_detections = 0
         self.required_consecutive = 3  # Number of consecutive detections needed
+
+    # Email configuration
+
+        self.email_config = email_config or {
+
+            'smtp_server': 'smtp.gmail.com',
+
+            'smtp_port': 587,
+
+            'sender_email': 'abhay29032005@gmail.com',
+
+            'sender_password': 'vren twft bfyg tzgi',
+
+            'recipient_email': 'guptavishnu2711@gmail.com'
+
+        }
+
+        
+
+        # Alert tracking
+
+        self.last_fire_alert = 0
+
+        self.last_intruder_alert = 0
+
+        self.alert_cooldown = 3600  # 1 hour cooldown between alerts
+
+
+
+    def send_email_alert(self, event_type, image_path=None):
+
+        """
+
+        Send email alert with optional attachment
+
+        """
+
+        current_time = time.time()
+
+        
+
+        # Check cooldown
+
+        if event_type == "Fire" and current_time - self.last_fire_alert < self.alert_cooldown:
+
+            return
+
+        if event_type == "Intruder" and current_time - self.last_intruder_alert < self.alert_cooldown:
+
+            return
+
+
+
+        try:
+
+            msg = MIMEMultipart()
+
+            msg['From'] = self.email_config['sender_email']
+
+            msg['To'] = self.email_config['recipient_email']
+
+            msg['Subject'] = f'ALERT: {event_type} Detected!'
+
+
+
+            # Email body
+
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            body = f"""
+
+            Security Alert!
+
+            
+
+            Event Type: {event_type}
+
+            Timestamp: {timestamp}
+
+            Location: CCTV Camera
+
+            
+
+            Please check your security system immediately.
+
+            """
+
+            msg.attach(MIMEText(body, 'plain'))
+
+
+
+            # Attach image if available
+
+            if image_path and os.path.exists(image_path):
+
+                with open(image_path, 'rb') as f:
+
+                    img_data = f.read()
+
+                    image = MIMEImage(img_data)
+
+                    image.add_header('Content-Disposition', 'attachment', filename=os.path.basename(image_path))
+
+                    msg.attach(image)
+
+
+
+            # Connect to SMTP server and send email
+
+            with smtplib.SMTP(self.email_config['smtp_server'], self.email_config['smtp_port']) as server:
+
+                server.starttls()
+
+                server.login(self.email_config['sender_email'], self.email_config['sender_password'])
+
+                server.send_message(msg)
+
+
+
+            # Update last alert time
+
+            if event_type == "Fire":
+
+                self.last_fire_alert = current_time
+
+            else:
+
+                self.last_intruder_alert = current_time
+
+
+
+            print(f"Email alert sent for {event_type} detection")
+
+
+
+        except Exception as e:
+
+            print(f"Failed to send email alert: {str(e)}")
+
+
+
     def draw_polygon(self, event, x, y, flags, param):
         """Handle mouse events for drawing the ROI polygon"""
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -141,9 +289,13 @@ class AdvancedCCTVAnalyzer:
 
     def handle_fire(self, frame):
         """Handle fire detection"""
-        if self.photo_count < self.number_of_photos:
-            self.capture_screenshot(frame)
+        screenshot_path = self.capture_screenshot(frame)
 
+            # Send email with the first screenshot
+
+        if self.photo_count == 1:
+
+                self.send_email_alert("Fire", screenshot_path)
         if not pygame.mixer.music.get_busy():
             pygame.mixer.music.play()
 
@@ -162,7 +314,11 @@ class AdvancedCCTVAnalyzer:
     def generate_alarm(self, event_type):
         """Generate alarm with timestamp"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"ALARM: {event_type} detected at {timestamp}")
+        with open("Alarm.txt", "a") as f:
+
+            f.write(f"{timestamp} - {event_type} Detected\n")
+
+
 
     def run(self):
         """Main run loop"""
